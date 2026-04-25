@@ -19,6 +19,7 @@ type SwipeState = {
   pointerId: number;
   startX: number;
   startY: number;
+  startScrollTop: number;
 };
 
 const timeFormatter = new Intl.DateTimeFormat("ja-JP", {
@@ -35,17 +36,23 @@ function formatSupabaseError(prefix: string, error: { message?: string | null } 
   return message ? `${prefix}: ${message}` : prefix;
 }
 
-function reorderTasks(tasks: Task[], activeId: string, overId: string) {
+function swapTaskWithSibling(tasks: Task[], activeId: string, direction: "up" | "down") {
   const currentIndex = tasks.findIndex((task) => task.id === activeId);
-  const targetIndex = tasks.findIndex((task) => task.id === overId);
 
-  if (currentIndex === -1 || targetIndex === -1 || currentIndex === targetIndex) {
+  if (currentIndex === -1) {
+    return tasks;
+  }
+
+  const targetIndex = direction === "up" ? currentIndex - 1 : currentIndex + 1;
+
+  if (targetIndex < 0 || targetIndex >= tasks.length) {
     return tasks;
   }
 
   const next = [...tasks];
-  const [moved] = next.splice(currentIndex, 1);
-  next.splice(targetIndex, 0, moved);
+  const activeTask = next[currentIndex];
+  next[currentIndex] = next[targetIndex];
+  next[targetIndex] = activeTask;
 
   return next.map((task, index) => ({
     ...task,
@@ -62,6 +69,7 @@ export function TaskListApp() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const viewportRef = useRef<HTMLElement | null>(null);
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const dragTimerRef = useRef<number | null>(null);
   const dragStateRef = useRef<DragState | null>(null);
@@ -70,6 +78,7 @@ export function TaskListApp() {
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [swipeOffsets, setSwipeOffsets] = useState<Record<string, number>>({});
   const [recentlyInsertedId, setRecentlyInsertedId] = useState<string | null>(null);
+  const [composerExiting, setComposerExiting] = useState(false);
   const tasksRef = useRef<Task[]>([]);
 
   useEffect(() => {
@@ -137,6 +146,20 @@ export function TaskListApp() {
     };
   }, [recentlyInsertedId]);
 
+  useEffect(() => {
+    if (!composerExiting) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setComposerExiting(false);
+    }, 380);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [composerExiting]);
+
   async function persistOrder(nextTasks: Task[]) {
     if (!supabase) {
       throw new Error("Supabase is unavailable.");
@@ -199,6 +222,7 @@ export function TaskListApp() {
       return;
     }
 
+    setComposerExiting(true);
     setTasks((current) =>
       insertMode === "stack" ? [data as Task, ...current] : [...current, data as Task]
     );
@@ -266,7 +290,8 @@ export function TaskListApp() {
       id: taskId,
       pointerId: event.pointerId,
       startX: event.clientX,
-      startY: event.clientY
+      startY: event.clientY,
+      startScrollTop: viewportRef.current?.scrollTop ?? 0
     };
 
     dragTimerRef.current = window.setTimeout(() => {
@@ -286,6 +311,7 @@ export function TaskListApp() {
     const swipeState = swipeStateRef.current;
 
     if (dragState && dragState.id === taskId && dragState.pointerId === event.pointerId) {
+      event.preventDefault();
       const offsetY = event.clientY - dragState.startY;
       dragStateRef.current = {
         ...dragState,
@@ -297,22 +323,85 @@ export function TaskListApp() {
         activeRow.style.transform = `translate3d(0, ${offsetY}px, 0)`;
       }
 
-      const hoveredTask = tasks.find((task) => {
-        if (task.id === taskId) {
-          return false;
+      const viewport = viewportRef.current;
+      if (viewport) {
+        const viewportRect = viewport.getBoundingClientRect();
+        const edgeThreshold = 72;
+
+        if (event.clientY < viewportRect.top + edgeThreshold) {
+          viewport.scrollTop -= 12;
+        } else if (event.clientY > viewportRect.bottom - edgeThreshold) {
+          viewport.scrollTop += 12;
         }
+      }
 
-        const element = rowRefs.current[task.id];
-        if (!element) {
-          return false;
+      const orderedTasks = tasksRef.current;
+      const activeIndex = orderedTasks.findIndex((task) => task.id === taskId);
+      const activeRect = activeRow?.getBoundingClientRect();
+
+      if (activeIndex === -1 || !activeRect) {
+        return;
+      }
+
+      const previousTask = activeIndex > 0 ? orderedTasks[activeIndex - 1] : null;
+      const nextTask = activeIndex < orderedTasks.length - 1 ? orderedTasks[activeIndex + 1] : null;
+
+      if (previousTask) {
+        const previousRow = rowRefs.current[previousTask.id];
+        const previousRect = previousRow?.getBoundingClientRect();
+
+        if (previousRect && event.clientY < previousRect.top + previousRect.height / 2) {
+          const nextOffsetY = offsetY - (previousRect.top - activeRect.top);
+          dragStateRef.current = {
+            ...dragStateRef.current,
+            id: taskId,
+            pointerId: event.pointerId,
+            startY: event.clientY - nextOffsetY,
+            offsetY: nextOffsetY
+          };
+
+          setTasks((current) => {
+            const next = swapTaskWithSibling(current, taskId, "up");
+            tasksRef.current = next;
+            return next;
+          });
+          window.requestAnimationFrame(() => {
+            const nextRow = rowRefs.current[taskId];
+            if (nextRow) {
+              nextRow.style.transform = `translate3d(0, ${nextOffsetY}px, 0)`;
+            }
+          });
+          return;
         }
+      }
 
-        const rect = element.getBoundingClientRect();
-        return event.clientY >= rect.top && event.clientY <= rect.bottom;
-      });
+      if (nextTask) {
+        const nextRow = rowRefs.current[nextTask.id];
+        const nextRect = nextRow?.getBoundingClientRect();
 
-      if (hoveredTask) {
-        setTasks((current) => reorderTasks(current, taskId, hoveredTask.id));
+        if (nextRect && event.clientY > nextRect.top + nextRect.height / 2) {
+          const nextOffsetY = offsetY - (nextRect.top - activeRect.top);
+          dragStateRef.current = {
+            ...dragStateRef.current,
+            id: taskId,
+            pointerId: event.pointerId,
+            startY: event.clientY - nextOffsetY,
+            offsetY: nextOffsetY
+          };
+
+          setTasks((current) => {
+            const next = swapTaskWithSibling(current, taskId, "down");
+            tasksRef.current = next;
+            return next;
+          });
+          window.requestAnimationFrame(() => {
+            const nextRow = rowRefs.current[taskId];
+            if (nextRow) {
+              nextRow.style.transform = `translate3d(0, ${nextOffsetY}px, 0)`;
+            }
+          });
+          return;
+        }
       }
 
       return;
@@ -323,17 +412,23 @@ export function TaskListApp() {
     }
 
     const deltaX = event.clientX - swipeState.startX;
-    const deltaY = Math.abs(event.clientY - swipeState.startY);
+    const deltaY = event.clientY - swipeState.startY;
+    const absDeltaY = Math.abs(deltaY);
 
-    if (deltaY > 18 && Math.abs(deltaX) < 18) {
+    if (absDeltaY > 12 && absDeltaY > Math.abs(deltaX)) {
       if (dragTimerRef.current) {
         window.clearTimeout(dragTimerRef.current);
         dragTimerRef.current = null;
       }
+
+      if (viewportRef.current) {
+        viewportRef.current.scrollTop = swipeState.startScrollTop - deltaY;
+      }
+
       return;
     }
 
-    if (deltaX > 0 && deltaY < 28) {
+    if (deltaX > 0 && absDeltaY < 28) {
       if (dragTimerRef.current) {
         window.clearTimeout(dragTimerRef.current);
         dragTimerRef.current = null;
@@ -352,6 +447,10 @@ export function TaskListApp() {
     const row = rowRefs.current[taskId];
     const dragState = dragStateRef.current;
     const swipeOffset = swipeOffsetRef.current[taskId] ?? 0;
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
 
     if (row) {
       row.style.transform = "";
@@ -398,10 +497,11 @@ export function TaskListApp() {
         <section className="photoBoard">
           <header className="pageHeader">
             <h1 className="pageTitle">やること木箱</h1>
-            <p className="pageSubtitle">14文字以内で入力してください。詳細は箱の中に</p>
+            <p className="pageSubtitle">14文字以内。長押しで上下入れ替え、右スワイプで削除。</p>
           </header>
 
           <section
+            ref={viewportRef}
             className={`taskViewport ${tasks.length <= 5 ? "isBottomStack" : "isTopStack"}`}
             aria-live="polite"
           >
@@ -409,7 +509,9 @@ export function TaskListApp() {
               {tasks.map((task, index) => (
                 <div
                   key={task.id}
-                  className={`taskRow${recentlyInsertedId === task.id ? " isInserted" : ""}`}
+                  className={`taskRow${recentlyInsertedId === task.id ? " isInserted" : ""}${
+                    draggingId === task.id ? " isDraggingRow" : ""
+                  }`}
                   ref={(element) => {
                     rowRefs.current[task.id] = element;
                   }}
@@ -453,7 +555,11 @@ export function TaskListApp() {
 
           <form className="composerForm" onSubmit={handleAddTask}>
             <div className="taskRow taskRowComposer">
-              <div className="taskCardShell taskCardShellComposer">
+              <div
+                className={`taskCardShell taskCardShellComposer${
+                  composerExiting ? " isExiting" : ""
+                }`}
+              >
                 <div className="woodBoxCard woodBoxCardComposer" aria-hidden="true" />
                 <div className="woodBoxFace woodBoxFaceComposer">
                   <div className="woodBoxTitlePlate woodBoxTitlePlateComposer">

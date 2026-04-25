@@ -10,11 +10,12 @@
   --woodbox-overhang-y: 60%; /*画像がはみ出して重なる量*/
   --stack-top-allowance: 110px; /*上側だけ増やす表示枠*/
   --composer-face-y: 0px;/*入力用全体*/
-  --composer-title-y: 15px;/*やること追加*/
-  --composer-meta-y: 5px;/*returnで追加*/
+  --composer-title-y: 23px;/*やること追加*/
+  --composer-meta-y: 14px;/*returnで追加*/
   --display-face-y: 0px; /*表示用全体*/
   --display-title-y: 0px;/*やること*/
   --display-meta-y: 25px;/*日付*/
+  --display-meta-x: 45px;/*日付の左右*/
 }
 
 * {
@@ -139,6 +140,11 @@ button {
   z-index: var(--stack-z, 1);
 }
 
+.taskRow.isDraggingRow {
+  z-index: 2000;
+  will-change: transform;
+}
+
 .deleteLayer {
   position: absolute;
   inset: 22% 7% 17% 18%;
@@ -159,6 +165,11 @@ button {
   width: 100%;
   aspect-ratio: var(--woodbox-hit-aspect);
   transition: transform 180ms ease;
+  will-change: transform;
+}
+
+.taskRow.isDraggingRow .taskCardShell {
+  transition: none;
 }
 
 .woodBoxCard {
@@ -167,15 +178,16 @@ button {
   background: url("/wood-box.png") center 56% / 100% auto no-repeat;
   filter: drop-shadow(0 10px 18px rgba(90, 67, 46, 0.16));
   pointer-events: none;
+  will-change: transform;
 }
 
 .taskHitArea {
   position: absolute;
   inset: 0;
   z-index: 2;
-  clip-path: polygon(21% 15%, 89% 15%, 100% 0, 100% 68%, 86% 100%, 0 100%, 0 34%);
+  clip-path: polygon(14% 14%, 90% 14%, 100% 0, 100% 72%, 88% 100%, 0 100%, 0 28%);
   background: transparent;
-  touch-action: pan-y;
+  touch-action: none;
 }
 
 .woodBoxCardComposer {
@@ -198,12 +210,16 @@ button {
   filter: drop-shadow(0 18px 28px rgba(90, 67, 46, 0.22));
 }
 
+.taskRow.isDraggingRow .woodBoxCard {
+  filter: drop-shadow(0 12px 18px rgba(90, 67, 46, 0.2));
+}
+
 .woodBoxFace {
   position: absolute;
   left: 20.5%;
   top: 60%;
   width: 51%;
-  min-height: 13%;
+  min-height: 18%;
   transform: translateY(-50%);
   display: grid;
   justify-items: center;
@@ -220,6 +236,7 @@ button {
 
 .woodBoxFaceDisplay {
   transform: translateY(calc(-50% + var(--display-face-y)));
+  pointer-events: none;
 }
 
 .woodBoxTitlePlate,
@@ -286,11 +303,18 @@ button {
 }
 
 .taskMetaPlateDisplay {
-  transform: translateY(var(--display-meta-y));
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  transform: translate(var(--display-meta-x), var(--display-meta-y));
 }
 
 .taskRow.isInserted .taskCardShell {
   animation: card-slide-in 520ms cubic-bezier(0.2, 0.88, 0.24, 1);
+}
+
+.taskCardShellComposer.isExiting {
+  animation: composer-slide-out 360ms cubic-bezier(0.4, 0.0, 0.2, 1);
 }
 
 .emptyState,
@@ -388,6 +412,18 @@ button {
   100% {
     opacity: 1;
     transform: translateX(0);
+  }
+}
+
+@keyframes composer-slide-out {
+  0% {
+    opacity: 1;
+    transform: translateX(0);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateX(56px);
   }
 }
 
