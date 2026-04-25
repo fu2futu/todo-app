@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, PointerEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, FormEvent, PointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import { getSupabaseClient } from "@/lib/supabase";
 import type { Task } from "@/types/task";
 
@@ -27,6 +27,8 @@ const timeFormatter = new Intl.DateTimeFormat("ja-JP", {
   hour: "2-digit",
   minute: "2-digit"
 });
+
+type InsertMode = "stack" | "queue";
 
 function formatSupabaseError(prefix: string, error: { message?: string | null } | null) {
   const message = error?.message?.trim();
@@ -55,6 +57,8 @@ export function TaskListApp() {
   const supabase = useMemo(() => getSupabaseClient(), []);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [draft, setDraft] = useState("");
+  const [insertMode, setInsertMode] = useState<InsertMode>("queue");
+  const [menuOpen, setMenuOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -65,11 +69,23 @@ export function TaskListApp() {
   const swipeOffsetRef = useRef<Record<string, number>>({});
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [swipeOffsets, setSwipeOffsets] = useState<Record<string, number>>({});
+  const [recentlyInsertedId, setRecentlyInsertedId] = useState<string | null>(null);
   const tasksRef = useRef<Task[]>([]);
 
   useEffect(() => {
     tasksRef.current = tasks;
   }, [tasks]);
+
+  useEffect(() => {
+    const savedMode = window.localStorage.getItem("todo-insert-mode");
+    if (savedMode === "stack" || savedMode === "queue") {
+      setInsertMode(savedMode);
+    }
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem("todo-insert-mode", insertMode);
+  }, [insertMode]);
 
   useEffect(() => {
     let active = true;
@@ -100,12 +116,26 @@ export function TaskListApp() {
       setLoading(false);
     }
 
-    loadTasks();
+    void loadTasks();
 
     return () => {
       active = false;
     };
   }, [supabase]);
+
+  useEffect(() => {
+    if (!recentlyInsertedId) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setRecentlyInsertedId(null);
+    }, 700);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [recentlyInsertedId]);
 
   async function persistOrder(nextTasks: Task[]) {
     if (!supabase) {
@@ -131,7 +161,11 @@ export function TaskListApp() {
 
   async function handleAddTask(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const title = draft.trim();
+    await submitDraftTask();
+  }
+
+  async function submitDraftTask() {
+    const title = draft.replace(/\s+/g, " ").trim().slice(0, 14);
 
     if (!title || saving) {
       return;
@@ -146,7 +180,10 @@ export function TaskListApp() {
       return;
     }
 
-    const priority = tasks.length + 1;
+    const priorities = tasks.map((task) => task.priority);
+    const minPriority = priorities.length > 0 ? Math.min(...priorities) : 0;
+    const maxPriority = priorities.length > 0 ? Math.max(...priorities) : 0;
+    const priority = insertMode === "stack" ? minPriority - 1 : maxPriority + 1;
     const { data, error: insertError } = await supabase
       .from("tasks")
       .insert({
@@ -162,8 +199,12 @@ export function TaskListApp() {
       return;
     }
 
-    setTasks((current) => [...current, data as Task]);
+    setTasks((current) =>
+      insertMode === "stack" ? [data as Task, ...current] : [...current, data as Task]
+    );
     setDraft("");
+    setRecentlyInsertedId((data as Task).id);
+    setMenuOpen(false);
     setSaving(false);
   }
 
@@ -253,7 +294,7 @@ export function TaskListApp() {
 
       const activeRow = rowRefs.current[taskId];
       if (activeRow) {
-        activeRow.style.transform = `translate3d(0, ${offsetY}px, 0) scale(1.01)`;
+        activeRow.style.transform = `translate3d(0, ${offsetY}px, 0)`;
       }
 
       const hoveredTask = tasks.find((task) => {
@@ -354,74 +395,134 @@ export function TaskListApp() {
   return (
     <main className="pageShell">
       <div className="pageFrame">
-        <header className="pageHeader">
-          <h1 className="pageTitle">やることリスト</h1>
-          <p className="pageSubtitle">長押しで並べ替え。右スワイプで削除。</p>
-        </header>
+        <section className="photoBoard">
+          <header className="pageHeader">
+            <h1 className="pageTitle">やること木箱</h1>
+            <p className="pageSubtitle">14文字以内で入力してください。詳細は箱の中に</p>
+          </header>
 
-        <section className="taskStack" aria-live="polite">
-          <form onSubmit={handleAddTask}>
-            <div className="taskRow">
-              <div className="taskCard">
-                <div className="taskGrip" aria-hidden="true">
-                  <div className="taskGripDots" />
+          <section
+            className={`taskViewport ${tasks.length <= 5 ? "isBottomStack" : "isTopStack"}`}
+            aria-live="polite"
+          >
+            <div className={`taskStack ${tasks.length <= 5 ? "isBottomStack" : "isTopStack"}`}>
+              {tasks.map((task, index) => (
+                <div
+                  key={task.id}
+                  className={`taskRow${recentlyInsertedId === task.id ? " isInserted" : ""}`}
+                  ref={(element) => {
+                    rowRefs.current[task.id] = element;
+                  }}
+                  style={
+                    {
+                      "--stack-z": tasks.length - index
+                    } as CSSProperties
+                  }
+                >
+                  <div className="deleteLayer">削除</div>
+                  <div
+                    className="taskCardShell"
+                    style={{
+                      transform: `translateX(${swipeOffsets[task.id] ?? 0}px)`
+                    }}
+                  >
+                    <div
+                      className={`woodBoxCard${draggingId === task.id ? " isDragging" : ""}`}
+                      aria-hidden="true"
+                    />
+                    <div
+                      className="taskHitArea"
+                      onPointerDown={(event) => handlePointerDown(event, task.id)}
+                      onPointerMove={(event) => handlePointerMove(event, task.id)}
+                      onPointerUp={(event) => void handlePointerEnd(event, task.id)}
+                      onPointerCancel={(event) => void handlePointerEnd(event, task.id)}
+                    />
+                    <div className="woodBoxFace woodBoxFaceDisplay">
+                      <div className="woodBoxTitlePlate woodBoxTitlePlateDisplay">
+                        <div className="taskText">{task.title}</div>
+                      </div>
+                      <span className="taskMeta taskMetaPlate taskMetaPlateDisplay">
+                        {timeFormatter.format(new Date(task.updated_at))}
+                      </span>
+                    </div>
+                  </div>
                 </div>
-                <div className="taskBody">
-                  <input
-                    className="taskInput"
-                    type="text"
-                    inputMode="text"
-                    enterKeyHint="done"
-                    placeholder="新しいタスクを追加"
-                    value={draft}
-                    onChange={(event) => setDraft(event.target.value)}
-                  />
-                  <span className="taskMeta">入力して return で追加</span>
+              ))}
+            </div>
+          </section>
+
+          <form className="composerForm" onSubmit={handleAddTask}>
+            <div className="taskRow taskRowComposer">
+              <div className="taskCardShell taskCardShellComposer">
+                <div className="woodBoxCard woodBoxCardComposer" aria-hidden="true" />
+                <div className="woodBoxFace woodBoxFaceComposer">
+                  <div className="woodBoxTitlePlate woodBoxTitlePlateComposer">
+                    <textarea
+                      className="taskInput"
+                      enterKeyHint="done"
+                      rows={2}
+                      placeholder="やることを追加"
+                      value={draft}
+                      maxLength={14}
+                      onChange={(event) =>
+                        setDraft(event.target.value.replace(/\r?\n/g, " ").slice(0, 14))
+                      }
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          void submitDraftTask();
+                        }
+                      }}
+                    />
+                  </div>
+                  <span className="taskMeta taskMetaPlate taskMetaPlateComposer">return で追加</span>
                 </div>
               </div>
             </div>
           </form>
-
-          {tasks.map((task) => (
-            <div
-              key={task.id}
-              className="taskRow"
-              ref={(element) => {
-                rowRefs.current[task.id] = element;
-              }}
-            >
-              <div className="deleteLayer">削除</div>
-              <div
-                className={`taskCard${draggingId === task.id ? " isDragging" : ""}`}
-                onPointerDown={(event) => handlePointerDown(event, task.id)}
-                onPointerMove={(event) => handlePointerMove(event, task.id)}
-                onPointerUp={(event) => void handlePointerEnd(event, task.id)}
-                onPointerCancel={(event) => void handlePointerEnd(event, task.id)}
-                style={{
-                  transform:
-                    draggingId === task.id
-                      ? undefined
-                      : `translateX(${swipeOffsets[task.id] ?? 0}px)`
-                }}
-              >
-                <div className="taskGrip" aria-hidden="true">
-                  <div className="taskGripDots" />
-                </div>
-                <div className="taskBody">
-                  <div className="taskText">{task.title}</div>
-                  <span className="taskMeta">{timeFormatter.format(new Date(task.updated_at))}</span>
-                </div>
-              </div>
-            </div>
-          ))}
         </section>
 
         {!loading && tasks.length === 0 ? (
-          <div className="emptyState">まだタスクがありません。上の欄から追加してください。</div>
+          <div className="emptyState">まだタスクがありません。上の箱から追加してください。</div>
         ) : null}
 
         {error ? <div className="errorState">{error}</div> : null}
         <div className="statusRow">{loading ? "読み込み中..." : saving ? "保存中..." : "同期済み"}</div>
+        <div className="modeDock">
+          {menuOpen ? (
+            <div className="modeMenu">
+              <button
+                type="button"
+                className={`modeMenuItem${insertMode === "stack" ? " isActive" : ""}`}
+                onClick={() => {
+                  setInsertMode("stack");
+                  setMenuOpen(false);
+                }}
+              >
+                スタック
+              </button>
+              <button
+                type="button"
+                className={`modeMenuItem${insertMode === "queue" ? " isActive" : ""}`}
+                onClick={() => {
+                  setInsertMode("queue");
+                  setMenuOpen(false);
+                }}
+              >
+                キュー
+              </button>
+            </div>
+          ) : null}
+          <button
+            type="button"
+            className="modeButton"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen((current) => !current)}
+          >
+            {insertMode === "stack" ? "S" : "Q"}
+          </button>
+        </div>
       </div>
     </main>
   );
