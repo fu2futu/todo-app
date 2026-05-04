@@ -12,6 +12,8 @@ type DragState = {
   pointerId: number;
   startY: number;
   offsetY: number;
+  initialIndex: number;
+  currentIndex: number;
 };
 
 type SwipeState = {
@@ -165,20 +167,34 @@ export function TaskListApp() {
       throw new Error("Supabase is unavailable.");
     }
 
-    const updates = nextTasks.map((task, index) =>
-      supabase
+    // UNIQUE制約による競合を避けるため、一時的に負の優先度を割り当てる
+    for (let i = 0; i < nextTasks.length; i++) {
+      const task = nextTasks[i];
+      const { error } = await supabase
         .from("tasks")
         .update({
-          priority: index + 1
+          priority: -(i + 1)  // 一時的に負の値
         })
-        .eq("id", task.id)
-    );
+        .eq("id", task.id);
 
-    const results = await Promise.all(updates);
-    const failed = results.find((result) => result.error);
+      if (error) {
+        throw error;
+      }
+    }
 
-    if (failed?.error) {
-      throw failed.error;
+    // その後、正の優先度に更新
+    for (let i = 0; i < nextTasks.length; i++) {
+      const task = nextTasks[i];
+      const { error } = await supabase
+        .from("tasks")
+        .update({
+          priority: i + 1
+        })
+        .eq("id", task.id);
+
+      if (error) {
+        throw error;
+      }
     }
   }
 
@@ -295,11 +311,14 @@ export function TaskListApp() {
     };
 
     dragTimerRef.current = window.setTimeout(() => {
+      const currentIndex = tasksRef.current.findIndex((task) => task.id === taskId);
       dragStateRef.current = {
         id: taskId,
         pointerId: event.pointerId,
         startY: event.clientY,
-        offsetY: 0
+        offsetY: 0,
+        initialIndex: currentIndex,
+        currentIndex: currentIndex
       };
       setDraggingId(taskId);
       setSwipeOffsets((current) => ({ ...current, [taskId]: 0 }));
@@ -313,16 +332,14 @@ export function TaskListApp() {
     if (dragState && dragState.id === taskId && dragState.pointerId === event.pointerId) {
       event.preventDefault();
       const offsetY = event.clientY - dragState.startY;
-      dragStateRef.current = {
-        ...dragState,
-        offsetY
-      };
-
+      
+      // ドラッグされているアイテムのtransformを更新
       const activeRow = rowRefs.current[taskId];
       if (activeRow) {
         activeRow.style.transform = `translate3d(0, ${offsetY}px, 0)`;
       }
 
+      // スクロール
       const viewport = viewportRef.current;
       if (viewport) {
         const viewportRect = viewport.getBoundingClientRect();
@@ -335,73 +352,56 @@ export function TaskListApp() {
         }
       }
 
+      // 入れ替わる相手を判定
       const orderedTasks = tasksRef.current;
       const activeIndex = orderedTasks.findIndex((task) => task.id === taskId);
       const activeRect = activeRow?.getBoundingClientRect();
+      const rowHeight = activeRect?.height ?? 0;
 
-      if (activeIndex === -1 || !activeRect) {
+      if (activeIndex === -1 || !activeRect || rowHeight === 0) {
         return;
       }
 
-      const previousTask = activeIndex > 0 ? orderedTasks[activeIndex - 1] : null;
-      const nextTask = activeIndex < orderedTasks.length - 1 ? orderedTasks[activeIndex + 1] : null;
+      // オフセット量から何個分移動したかを計算
+      const movement = Math.round(offsetY / rowHeight);
+      const newIndex = Math.max(0, Math.min(activeIndex + movement, orderedTasks.length - 1));
 
-      if (previousTask) {
-        const previousRow = rowRefs.current[previousTask.id];
-        const previousRect = previousRow?.getBoundingClientRect();
+      // 新しいインデックスが前のインデックスと異なれば、中間のアイテムをtransformで移動
+      if (newIndex !== dragState.currentIndex) {
+        orderedTasks.forEach((task, index) => {
+          if (task.id === taskId) {
+            return;  // ドラッグ中のアイテムは処理しない
+          }
 
-        if (previousRect && event.clientY < previousRect.top + previousRect.height / 2) {
-          const nextOffsetY = offsetY - (previousRect.top - activeRect.top);
-          dragStateRef.current = {
-            ...dragStateRef.current,
-            id: taskId,
-            pointerId: event.pointerId,
-            startY: event.clientY - nextOffsetY,
-            offsetY: nextOffsetY
-          };
+          // 新しいインデックスと前のインデックスの範囲内なら移動させる
+          const minIndex = Math.min(dragState.currentIndex, newIndex);
+          const maxIndex = Math.max(dragState.currentIndex, newIndex);
 
-          setTasks((current) => {
-            const next = swapTaskWithSibling(current, taskId, "up");
-            tasksRef.current = next;
-            return next;
-          });
-          window.requestAnimationFrame(() => {
-            const nextRow = rowRefs.current[taskId];
-            if (nextRow) {
-              nextRow.style.transform = `translate3d(0, ${nextOffsetY}px, 0)`;
+          if (index >= minIndex && index <= maxIndex) {
+            const row = rowRefs.current[task.id];
+            if (row) {
+              if (newIndex > dragState.currentIndex) {
+                // 下に移動する場合、その範囲のアイテムを上に
+                row.style.transform = `translate3d(0, ${-rowHeight}px, 0)`;
+              } else {
+                // 上に移動する場合、その範囲のアイテムを下に
+                row.style.transform = `translate3d(0, ${rowHeight}px, 0)`;
+              }
             }
-          });
-          return;
-        }
-      }
-
-      if (nextTask) {
-        const nextRow = rowRefs.current[nextTask.id];
-        const nextRect = nextRow?.getBoundingClientRect();
-
-        if (nextRect && event.clientY > nextRect.top + nextRect.height / 2) {
-          const nextOffsetY = offsetY - (nextRect.top - activeRect.top);
-          dragStateRef.current = {
-            ...dragStateRef.current,
-            id: taskId,
-            pointerId: event.pointerId,
-            startY: event.clientY - nextOffsetY,
-            offsetY: nextOffsetY
-          };
-
-          setTasks((current) => {
-            const next = swapTaskWithSibling(current, taskId, "down");
-            tasksRef.current = next;
-            return next;
-          });
-          window.requestAnimationFrame(() => {
-            const nextRow = rowRefs.current[taskId];
-            if (nextRow) {
-              nextRow.style.transform = `translate3d(0, ${nextOffsetY}px, 0)`;
+          } else {
+            // 範囲外のアイテムはリセット
+            const row = rowRefs.current[task.id];
+            if (row) {
+              row.style.transform = "";
             }
-          });
-          return;
-        }
+          }
+        });
+
+        dragStateRef.current = {
+          ...dragState,
+          offsetY,
+          currentIndex: newIndex
+        };
       }
 
       return;
@@ -452,31 +452,61 @@ export function TaskListApp() {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
 
-    if (row) {
-      row.style.transform = "";
-    }
-
     if (dragState && dragState.id === taskId && dragState.pointerId === event.pointerId) {
       setDraggingId(null);
       clearGestureState();
-      swipeOffsetRef.current[taskId] = 0;
-      setSwipeOffsets((current) => ({ ...current, [taskId]: 0 }));
 
-      try {
-        setSaving(true);
-        await persistOrder(tasksRef.current);
-      } catch (persistError) {
-        setError(
-          formatSupabaseError(
-            "並べ替えの保存に失敗しました",
-            persistError instanceof Error ? { message: persistError.message } : null
-          )
-        );
-      } finally {
-        setSaving(false);
+      // 全アイテムのtransformをリセット
+      tasksRef.current.forEach((task) => {
+        const taskRow = rowRefs.current[task.id];
+        if (taskRow) {
+          taskRow.style.transform = "";
+        }
+      });
+
+      // インデックスが変わっていれば tasks を更新
+      if (dragState.currentIndex !== dragState.initialIndex) {
+        const currentTasks = tasksRef.current;
+        const draggedTask = currentTasks[dragState.initialIndex];
+        
+        // 初期位置から現在位置への順序変更を反映
+        const newTasks = currentTasks.filter((_, index) => index !== dragState.initialIndex);
+        newTasks.splice(dragState.currentIndex, 0, draggedTask);
+        
+        // 優先度を再計算
+        const finalTasks = newTasks.map((task, index) => ({
+          ...task,
+          priority: index + 1
+        }));
+
+        setTasks(finalTasks);
+        tasksRef.current = finalTasks;
+
+        try {
+          setSaving(true);
+          await persistOrder(finalTasks);
+        } catch (persistError) {
+          setError(
+            formatSupabaseError(
+              "並べ替えの保存に失敗しました",
+              persistError instanceof Error ? { message: persistError.message } : null
+            )
+          );
+          // ロールバック
+          setTasks(currentTasks);
+          tasksRef.current = currentTasks;
+        } finally {
+          setSaving(false);
+        }
       }
 
+      swipeOffsetRef.current[taskId] = 0;
+      setSwipeOffsets((current) => ({ ...current, [taskId]: 0 }));
       return;
+    }
+
+    if (row) {
+      row.style.transform = "";
     }
 
     clearGestureState();
